@@ -1,0 +1,621 @@
+#include <WiFi.h>
+#include <WebServer.h>
+
+// Network credentials for Access Point
+const char* ssid = "ESP32-Control-Panel";
+const char* password = "12345678";
+
+// Pin definitions
+const int LED_PIN = 25;        // Built-in LED on most ESP32 boards
+const int PUMP_PIN = 26;       // Relay control pin for water pump
+const int LM35_PIN = 32;       // Analog pin for LM35 temperature sensor
+const int TRIG_PIN = 13;       // Ultrasonic sensor trigger pin
+const int ECHO_PIN = 14;       // Ultrasonic sensor echo pin
+
+// Constants for stranger detection
+const int DISTANCE_THRESHOLD = 5;  // Distance threshold in cm
+bool strangerDetected = false;
+
+// Web server on port 80
+WebServer server(80);
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Initialize pins
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(PUMP_PIN, OUTPUT);
+  pinMode(LM35_PIN, INPUT);
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  
+  // Initially turn off LED and pump
+  digitalWrite(LED_PIN, LOW);
+  digitalWrite(PUMP_PIN, HIGH);  // Initialize pump relay as OFF (HIGH)
+  
+  // Configure ESP32 as Access Point
+  WiFi.softAP(ssid, password);
+  
+  Serial.println("Access Point Started");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.softAPIP());
+  
+  // Define web server routes
+  server.on("/", handleRoot);
+  server.on("/led", handleLED);
+  server.on("/pump", handlePump);
+  server.on("/temperature", handleTemperature);
+  server.on("/stranger", handleStranger);
+  
+  // Start web server
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+  checkForStranger();
+  delay(100);  // Small delay to prevent watchdog timer issues
+}
+
+// Read temperature from LM35
+float readTemperature() {
+  int rawValue = analogRead(LM35_PIN);
+  float voltage = (rawValue / 4095.0) * 3.3;
+  float temperatureC = (voltage * 1000.0) / 10.0;
+  return temperatureC;
+}
+
+// Measure distance using ultrasonic sensor
+int measureDistance() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  
+  long duration = pulseIn(ECHO_PIN, HIGH);
+  int distance = duration * 0.034 / 2;  // Calculate distance in cm
+  
+  return distance;
+}
+
+void checkForStranger() {
+  int distance = measureDistance();
+  Serial.println(distance);
+  strangerDetected = (distance < DISTANCE_THRESHOLD);
+}
+
+void handleRoot() {
+  String html = R"(
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+    <title>ESP32 Smart Control Panel</title>
+    <style>
+        :root {
+            --primary-color: #4a90e2;
+            --danger-color: #e74c3c;
+            --success-color: #2ecc71;
+            --warning-color: #f1c40f;
+            --text-color: #2c3e50;
+            --bg-color: #f5f7fa;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+
+        body {
+            background: var(--bg-color);
+            min-height: 100vh;
+            padding: 2rem;
+            color: var(--text-color);
+        }
+
+        .dashboard {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            color: var(--primary-color);
+            margin-bottom: 0.5rem;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .card {
+            background: white;
+            border-radius: 1rem;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            transition: transform 0.3s ease;
+        }
+
+        .card:hover {
+            transform: translateY(-5px);
+        }
+
+        .card h2 {
+            font-size: 1.25rem;
+            margin-bottom: 1rem;
+            color: var(--primary-color);
+        }
+
+        .metric {
+            font-size: 3rem;
+            font-weight: bold;
+            color: var(--text-color);
+            margin: 1rem 0;
+        }
+
+        .controls {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .button {
+            flex: 1;
+            min-width: 120px;
+            padding: 1rem;
+            border: none;
+            border-radius: 0.5rem;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            text-align: center;
+            color: white;
+            background: var(--primary-color);
+        }
+
+        .button:hover {
+            opacity: 0.9;
+            transform: translateY(-2px);
+        }
+
+        .alert {
+            padding: 1rem;
+            border-radius: 0.5rem;
+            background: var(--danger-color);
+            color: white;
+            margin-bottom: 1rem;
+            display: none;
+        }
+
+        .alert.show {
+            display: block;
+            animation: slideIn 0.3s ease;
+        }
+
+        @keyframes slideIn {
+            from {
+                transform: translateY(-20px);
+                opacity: 0;
+            }
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .button {
+                width: 100%;
+            }
+        }
+    </style>
+    <script>
+        function updateMetrics() {
+            // Update temperature
+            fetch('/temperature')
+                .then(response => response.text())
+                .then(data => {
+                    document.getElementById('temperature').innerHTML = parseFloat(data).toFixed(1);
+                });
+
+            // Check for stranger detection
+            fetch('/stranger')
+                .then(response => response.text())
+                .then(data => {
+                    const alert = document.getElementById('strangerAlert');
+                    if (data === '1') {
+                        alert.classList.add('show');
+                    } else {
+                        alert.classList.remove('show');
+                    }
+                });
+        }
+
+        // Update metrics every 2 seconds
+        setInterval(updateMetrics, 2000);
+    </script>
+</head>
+<body onload='updateMetrics()'>
+    <div class="dashboard">
+        <div class="header">
+            <h1>ESP32 Smart Control Panel</h1>
+        </div>
+
+        <div id="strangerAlert" class="alert">
+            Motion Detected! Someone might be nearby.
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <h2>Temperature Monitor</h2>
+                <div class="metric">
+                    <span id="temperature">--</span>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>System Controls</h2>
+                <div class="controls">
+                    <a href="/led" class="button">Toggle LED</a>
+                    <a href="/pump" class="button">Toggle Pump</a>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+)";
+  server.send(200, "text/html", html);
+}
+
+void handleLED() {
+  static int ledState = LOW;
+  ledState = (ledState == LOW) ? HIGH : LOW;
+  digitalWrite(LED_PIN, ledState);
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+void handlePump() {
+  static int pumpState = HIGH;
+  pumpState = (pumpState == HIGH) ? LOW : HIGH;
+  digitalWrite(PUMP_PIN, pumpState);
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+void handleTemperature() {
+  float temp = readTemperature();
+  server.send(200, "text/plain", String(temp, 1));
+}
+
+void handleStranger() {
+  server.send(200, "text/plain", strangerDetected ? "1" : "0");
+}#include <WiFi.h>
+#include <WebServer.h>
+
+// Network credentials for Access Point
+const char* ssid = "ESP32-Control-Panel";
+const char* password = "12345678";
+
+// Pin definitions
+const int LED_PIN = 25;        // Built-in LED on most ESP32 boards
+const int PUMP_PIN = 26;       // Relay control pin for water pump
+const int LM35_PIN = 32;       // Analog pin for LM35 temperature sensor
+const int TRIG_PIN = 13;       // Ultrasonic sensor trigger pin
+const int ECHO_PIN = 14;       // Ultrasonic sensor echo pin
+
+// Constants for stranger detection
+const int DISTANCE_THRESHOLD = 5;  // Distance threshold in cm
+bool strangerDetected = false;
+
+// Web server on port 80
+WebServer server(80);
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Initialize pins
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(PUMP_PIN, OUTPUT);
+  pinMode(LM35_PIN, INPUT);
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  
+  // Initially turn off LED and pump
+  digitalWrite(LED_PIN, LOW);
+  digitalWrite(PUMP_PIN, HIGH);  // Initialize pump relay as OFF (HIGH)
+  
+  // Configure ESP32 as Access Point
+  WiFi.softAP(ssid, password);
+  
+  Serial.println("Access Point Started");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.softAPIP());
+  
+  // Define web server routes
+  server.on("/", handleRoot);
+  server.on("/led", handleLED);
+  server.on("/pump", handlePump);
+  server.on("/temperature", handleTemperature);
+  server.on("/stranger", handleStranger);
+  
+  // Start web server
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+  checkForStranger();
+  delay(100);  // Small delay to prevent watchdog timer issues
+}
+
+// Read temperature from LM35
+float readTemperature() {
+  int rawValue = analogRead(LM35_PIN);
+  float voltage = (rawValue / 4095.0) * 3.3;
+  float temperatureC = (voltage * 1000.0) / 10.0;
+  return temperatureC;
+}
+
+// Measure distance using ultrasonic sensor
+int measureDistance() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  
+  long duration = pulseIn(ECHO_PIN, HIGH);
+  int distance = duration * 0.034 / 2;  // Calculate distance in cm
+  
+  return distance;
+}
+
+void checkForStranger() {
+  int distance = measureDistance();
+  Serial.println(distance);
+  strangerDetected = (distance < DISTANCE_THRESHOLD);
+}
+
+void handleRoot() {
+  String html = R"(
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+    <title>ESP32 Smart Control Panel</title>
+    <style>
+        :root {
+            --primary-color: #4a90e2;
+            --danger-color: #e74c3c;
+            --success-color: #2ecc71;
+            --warning-color: #f1c40f;
+            --text-color: #2c3e50;
+            --bg-color: #f5f7fa;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+
+        body {
+            background: var(--bg-color);
+            min-height: 100vh;
+            padding: 2rem;
+            color: var(--text-color);
+        }
+
+        .dashboard {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            color: var(--primary-color);
+            margin-bottom: 0.5rem;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .card {
+            background: white;
+            border-radius: 1rem;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            transition: transform 0.3s ease;
+        }
+
+        .card:hover {
+            transform: translateY(-5px);
+        }
+
+        .card h2 {
+            font-size: 1.25rem;
+            margin-bottom: 1rem;
+            color: var(--primary-color);
+        }
+
+        .metric {
+            font-size: 3rem;
+            font-weight: bold;
+            color: var(--text-color);
+            margin: 1rem 0;
+        }
+
+        .controls {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .button {
+            flex: 1;
+            min-width: 120px;
+            padding: 1rem;
+            border: none;
+            border-radius: 0.5rem;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            text-align: center;
+            color: white;
+            background: var(--primary-color);
+        }
+
+        .button:hover {
+            opacity: 0.9;
+            transform: translateY(-2px);
+        }
+
+        .alert {
+            padding: 1rem;
+            border-radius: 0.5rem;
+            background: var(--danger-color);
+            color: white;
+            margin-bottom: 1rem;
+            display: none;
+        }
+
+        .alert.show {
+            display: block;
+            animation: slideIn 0.3s ease;
+        }
+
+        @keyframes slideIn {
+            from {
+                transform: translateY(-20px);
+                opacity: 0;
+            }
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .button {
+                width: 100%;
+            }
+        }
+    </style>
+    <script>
+        function updateMetrics() {
+            // Update temperature
+            fetch('/temperature')
+                .then(response => response.text())
+                .then(data => {
+                    document.getElementById('temperature').innerHTML = parseFloat(data).toFixed(1);
+                });
+
+            // Check for stranger detection
+            fetch('/stranger')
+                .then(response => response.text())
+                .then(data => {
+                    const alert = document.getElementById('strangerAlert');
+                    if (data === '1') {
+                        alert.classList.add('show');
+                    } else {
+                        alert.classList.remove('show');
+                    }
+                });
+        }
+
+        // Update metrics every 2 seconds
+        setInterval(updateMetrics, 2000);
+    </script>
+</head>
+<body onload='updateMetrics()'>
+    <div class="dashboard">
+        <div class="header">
+            <h1>ESP32 Smart Control Panel</h1>
+        </div>
+
+        <div id="strangerAlert" class="alert">
+            Motion Detected! Someone might be nearby.
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <h2>Temperature Monitor</h2>
+                <div class="metric">
+                    <span id="temperature">--</span>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>System Controls</h2>
+                <div class="controls">
+                    <a href="/led" class="button">Toggle LED</a>
+                    <a href="/pump" class="button">Toggle Pump</a>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+)";
+  server.send(200, "text/html", html);
+}
+
+void handleLED() {
+  static int ledState = LOW;
+  ledState = (ledState == LOW) ? HIGH : LOW;
+  digitalWrite(LED_PIN, ledState);
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+void handlePump() {
+  static int pumpState = HIGH;
+  pumpState = (pumpState == HIGH) ? LOW : HIGH;
+  digitalWrite(PUMP_PIN, pumpState);
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+void handleTemperature() {
+  float temp = readTemperature();
+  server.send(200, "text/plain", String(temp, 1));
+}
+
+void handleStranger() {
+  server.send(200, "text/plain", strangerDetected ? "1" : "0");
+}
